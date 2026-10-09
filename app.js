@@ -206,6 +206,8 @@ function requireLogin() {
   } else {
     state.vendedor = null;
     document.getElementById('login-overlay')?.classList.remove('hidden');
+    // Primera vez sin URL: abrir Configuración para pegarla
+    if (!state.sheetsUrl) openConfigModal();
   }
 }
 
@@ -312,7 +314,11 @@ async function loginVendedor() {
     try { localStorage.setItem('ecomdx_sheets_url', manualUrl); } catch (e) {}
   }
   if (!login || !password) { showErr("Ingresa tu código y contraseña."); return; }
-  if (!state.sheetsUrl) { showErr("Falta la URL del sistema. Pídela al administrador."); return; }
+  if (!state.sheetsUrl) {
+    showErr("Falta la URL del sistema. Pégala en la ventana de Configuración.");
+    openConfigModal();
+    return;
+  }
   if (!navigator.onLine) { showErr("Sin conexión: el primer ingreso requiere internet. Luego funciona offline."); return; }
 
   const btn = document.getElementById('btn-login');
@@ -994,6 +1000,8 @@ function saveSheetsUrl() {
   try { localStorage.setItem('ecomdx_sheets_url', url); } catch (e) {}
   const loginInput = document.getElementById('login-sheets-url');
   if (loginInput) loginInput.value = url;
+  const wrap = document.getElementById('login-sheets-wrap');
+  if (wrap) wrap.classList.add('hidden');
   configMsg("Dirección guardada en este equipo.", true);
   loadMaestros();
 }
