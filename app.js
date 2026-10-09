@@ -104,10 +104,14 @@ async function loadCatalogData() {
     }
 
     // 3. Fallback a fetch por si corre en hosting HTTP
-    const res = await fetch('../shared-data/catalog_bundle.json');
+    const res = await fetch('./catalog_data.js');
     if (res.ok) {
-      const data = await res.json();
-      applyLoadedData(data);
+      // catalog_data.js define window.ECOMDX_CATALOG_DATA; evaluar y volver a intentar
+      const text = await res.text();
+      try { eval(text); } catch(e) {} // eslint-disable-line no-eval
+      if (window.ECOMDX_CATALOG_DATA) {
+        applyLoadedData(window.ECOMDX_CATALOG_DATA);
+      }
       return;
     }
   } catch (err) {

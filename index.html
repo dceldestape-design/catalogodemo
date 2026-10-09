@@ -10,7 +10,7 @@
   <meta name="theme-color" content="#2563eb">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <link rel="apple-touch-icon" href="../images/logo.png">
+  <link rel="apple-touch-icon" href="./logo.png">
 
   <!-- Tailwind CSS & FontAwesome -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -23,46 +23,46 @@
   <header class="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">
     <div class="max-w-7xl mx-auto px-3 sm:px-6 py-2.5">
       
-      <!-- Top Row: Logo, Client Quick View, Install Button -->
-      <div class="flex items-center justify-between gap-2 relative">
+      <!-- Top Row: Logo, Client Quick View, Action Buttons -->
+      <div class="flex items-center gap-1.5 relative">
         
         <!-- App Title & Logo -->
-        <div class="flex items-center gap-2.5">
-          <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center text-white shadow-md shadow-blue-500/25">
+        <div class="flex items-center gap-2 shrink-0">
+          <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center text-white shadow-md shadow-blue-500/25 shrink-0">
             <i class="fa-solid fa-layer-group text-sm"></i>
           </div>
-          <div class="hidden min-[380px]:block">
-            <h1 class="text-sm font-extrabold text-slate-900 leading-tight">EcomDx</h1>
-            <span class="text-[10px] font-semibold text-blue-600 uppercase tracking-wider">Catálogo Preventa</span>
+          <div class="hidden min-[360px]:block leading-tight">
+            <h1 class="text-sm font-extrabold text-slate-900">EcomDx</h1>
+            <span class="text-[10px] font-semibold text-blue-600 uppercase tracking-wider">Catálogo</span>
           </div>
         </div>
 
         <!-- Current Client Pill / Selector Trigger -->
-        <button onclick="openClientModal()" class="flex-1 max-w-sm sm:max-w-md mx-2 px-3 py-1.5 rounded-xl bg-blue-50/70 hover:bg-blue-100/70 border border-blue-200/60 transition flex items-center justify-between text-left group">
-          <div class="truncate mr-2">
-            <div class="text-[10px] uppercase font-bold text-blue-800 tracking-wider flex items-center gap-1.5">
-              <i class="fa-solid fa-store text-[10px]"></i>
-              <span id="header-client-code">Cliente: ...</span>
-              <span id="header-client-list-badge" class="bg-blue-600 text-white text-[9px] px-1.5 py-0.2 rounded font-bold">L1</span>
+        <button onclick="openClientModal()" class="flex-1 min-w-0 mx-1 px-2.5 py-1.5 rounded-xl bg-blue-50/70 hover:bg-blue-100/70 border border-blue-200/60 transition flex items-center justify-between text-left group">
+          <div class="truncate mr-1 min-w-0">
+            <div class="text-[10px] uppercase font-bold text-blue-800 tracking-wider flex items-center gap-1">
+              <i class="fa-solid fa-store text-[9px] shrink-0"></i>
+              <span id="header-client-code" class="truncate">Cliente</span>
+              <span id="header-client-list-badge" class="bg-blue-600 text-white text-[9px] px-1 py-0.5 rounded font-bold shrink-0">L1</span>
             </div>
             <div id="header-client-name" class="text-xs font-bold text-slate-900 truncate">Seleccionar Cliente</div>
           </div>
-          <span class="text-blue-600 group-hover:translate-x-0.5 transition text-xs shrink-0">
+          <span class="text-blue-600 text-xs shrink-0">
             <i class="fa-solid fa-chevron-down"></i>
           </span>
         </button>
 
         <!-- Action Buttons -->
-        <div class="flex items-center gap-1.5 shrink-0">
+        <div class="flex items-center gap-1 shrink-0">
           <!-- Refresh Data Button -->
-          <button onclick="reloadCatalogData()" title="Actualizar Catálogo" class="w-11 h-11 flex items-center justify-center rounded-xl bg-slate-100 active:bg-slate-300 text-slate-700 transition touch-manipulation">
+          <button onclick="reloadCatalogData()" title="Actualizar Catálogo" class="w-10 h-10 flex items-center justify-center rounded-xl bg-slate-100 active:bg-slate-300 text-slate-700 transition touch-manipulation shrink-0">
             <i class="fa-solid fa-arrows-rotate text-sm"></i>
           </button>
 
           <!-- Seller Session -->
-          <button id="btn-seller" onclick="toggleMenu()" title="Sesión de vendedor y menú" class="h-11 pl-2.5 pr-3 flex items-center gap-1.5 rounded-xl bg-indigo-50 active:bg-indigo-100 text-indigo-700 border border-indigo-200 transition touch-manipulation">
+          <button id="btn-seller" onclick="toggleMenu()" title="Sesión de vendedor y menú" class="h-10 pl-2 pr-2.5 flex items-center gap-1 rounded-xl bg-indigo-50 active:bg-indigo-100 text-indigo-700 border border-indigo-200 transition touch-manipulation shrink-0">
             <i class="fa-solid fa-id-badge text-sm"></i>
-            <span id="header-seller-name" class="text-xs font-bold max-w-[72px] truncate">...</span>
+            <span id="header-seller-name" class="text-xs font-bold max-w-[60px] truncate hidden min-[400px]:inline">...</span>
             <i class="fa-solid fa-ellipsis-vertical text-xs opacity-60"></i>
           </button>
         </div>
@@ -158,7 +158,7 @@
   <div id="login-overlay" class="fixed inset-0 z-[60] bg-slate-900/95 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
     <div class="bg-white rounded-2xl w-full max-w-sm p-6 shadow-2xl my-auto">
       <div class="text-center mb-4">
-        <img src="../images/logo.png" alt="Distribuciones Castro" class="w-20 h-20 rounded-full object-cover mx-auto mb-2 shadow-md">
+        <img src="./logo.png" alt="EcomDx" class="w-20 h-20 rounded-full object-cover mx-auto mb-2 shadow-md">
         <h2 class="text-base font-extrabold text-slate-900">Acceso Vendedor</h2>
         <p class="text-xs text-slate-500">Ingresa con tu código de vendedor</p>
       </div>
@@ -316,7 +316,7 @@
   </div>
 
   <!-- Standalone Data & Scripts -->
-  <script src="../shared-data/catalog_data.js"></script>
+  <script src="./catalog_data.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
