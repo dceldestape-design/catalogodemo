@@ -1,0 +1,95 @@
+/* Styles for Preventa Catalog App (100% móvil) */
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+button {
+  touch-action: manipulation;
+}
+
+/* Hide scrollbar for category pills while maintaining scroll */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Image Card Zoom on Hover / Touch */
+.product-card {
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease;
+}
+
+.product-card:hover {
+  transform: translateY(-2px);
+}
+
+/* Modal Zoom & Pan */
+.zoom-container {
+  overflow: hidden;
+  position: relative;
+  touch-action: pinch-zoom;
+}
+
+#modal-image {
+  transition: transform 0.15s ease-out;
+  cursor: grab;
+  user-select: none;
+}
+
+#modal-image:active {
+  cursor: grabbing;
+}
+
+/* Smooth badges */
+.badge-discount {
+  background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+}
+
+/* Mobile menu items (táctil 48px) */
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 48px;
+  padding: 0.6rem 0.9rem;
+  border-radius: 0.8rem;
+  font-weight: 600;
+  color: #334155;
+  text-align: left;
+  width: 100%;
+}
+.menu-item:active {
+  background: #f1f5f9;
+}
+
+/* Overlays respetan notch/gestos */
+#login-overlay,
+#client-modal,
+#zoom-modal,
+#config-modal {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Solo táctil: sin zoom automático de iOS, chips más tocables */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+  .category-chip {
+    padding-top: 0.45rem;
+    padding-bottom: 0.45rem;
+  }
+}
