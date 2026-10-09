@@ -30,6 +30,8 @@ const formatColones = (num) => {
 document.addEventListener('DOMContentLoaded', async () => {
   initPWA();
   await loadCatalogData();
+  // El login siempre se exige, haya o no datos (ej. repo sin bundle aún)
+  try { requireLogin(); } catch (e) { console.warn("login init:", e); }
   setupEventListeners();
 });
 

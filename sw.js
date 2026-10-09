@@ -2,7 +2,7 @@
  * EcomDx Preventa - Service Worker for Offline Catalog Navigation
  * App 100% móvil y offline: shell + datos + fotos vistas quedan en caché.
  */
-const CACHE_NAME = 'ecomdx-preventa-v1.1';
+const CACHE_NAME = 'ecomdx-preventa-v1.2';
 const ASSETS_TO_CACHE = [
   './index.html',
   './styles.css',
