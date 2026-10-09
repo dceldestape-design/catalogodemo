@@ -156,8 +156,6 @@ function applyLoadedData(data) {
   selectInitialClient();
   renderCategoryChips();
   applyFilters();
-  // Maestros directo del Sheet como respaldo (si el bundle aún no los trae)
-  loadMaestros();
   // Puerta de acceso por vendedor (verificada en el Sheet)
   requireLogin();
 }
@@ -203,14 +201,29 @@ function requireLogin() {
   if (s && s.codigo) {
     state.vendedor = s;
     showAppForSeller();
-    // Traer la ruta del vendedor (su usuario=) en segundo plano
-    refreshVendorCatalog(false);
+    // Sin descargas automáticas: usa la ruta guardada o el paquete base
+    restoreVendorCache();
   } else {
     state.vendedor = null;
     document.getElementById('login-overlay')?.classList.remove('hidden');
     // Primera vez sin URL: abrir Configuración para pegarla
     if (!state.sheetsUrl) openConfigModal();
   }
+}
+
+// Restaura la ruta guardada del vendedor (sin red). Si no hay, queda el paquete base.
+function restoreVendorCache() {
+  const cached = getVendorCache(state.vendedor.codigo);
+  if (!cached) return false;
+  state.products = cached.products || [];
+  state.clients = cached.clients || [];
+  state.discounts = cached.discounts || [];
+  state.cabysMap = cached.cabysMap || {};
+  state.selectedCategory = 'ALL';
+  selectInitialClient();
+  renderCategoryChips();
+  applyFilters();
+  return true;
 }
 
 /**
@@ -227,16 +240,28 @@ async function fetchVendorType(type, vendor) {
   return json.items;
 }
 
-async function downloadVendorCatalog(vendor) {
-  const [products, clients, discounts, cabysItems] = await Promise.all([
-    fetchVendorType("products", vendor),
-    fetchVendorType("clients", vendor),
-    fetchVendorType("discounts", vendor),
-    fetchVendorType("cabys", vendor)
-  ]);
+async function downloadVendorCatalog(vendor, onProgress) {
+  // Secuencial con reintentos: evita saturar al Sheet y no trunca a la primera falla
+  const order = ["products", "clients", "discounts", "cabys"];
+  const got = {};
+  for (const t of order) {
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (onProgress) onProgress(t, attempt);
+        got[t] = await fetchVendorType(t, vendor);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        await new Promise(r => setTimeout(r, 1200 * attempt));
+      }
+    }
+    if (lastErr) throw new Error(`${t}: ${lastErr.message}`);
+  }
   const cabysMap = {};
-  cabysItems.forEach(c => { if (c && c.pro_codecom) cabysMap[String(c.pro_codecom).trim()] = c; });
-  return { products, clients, discounts, cabysMap };
+  got.cabys.forEach(c => { if (c && c.pro_codecom) cabysMap[String(c.pro_codecom).trim()] = c; });
+  return { products: got.products, clients: got.clients, discounts: got.discounts, cabysMap };
 }
 
 function getVendorCache(vendor) {
@@ -268,39 +293,12 @@ function applyVendorCatalog(cat) {
   applyFilters();
 }
 
-// Sesión restaurada: intenta ruta fresca, si no hay red usa la guardada, si no el bundle.
-async function refreshVendorCatalog(strict) {
-  if (!state.vendedor || !state.sheetsUrl) return false;
-  try {
-    applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo));
-    return true;
-  } catch (e) {
-    console.warn("ruta vendedor:", e);
-    const cached = getVendorCache(state.vendedor.codigo);
-    if (cached) {
-      state.products = cached.products || [];
-      state.clients = cached.clients || [];
-      state.discounts = cached.discounts || [];
-      state.cabysMap = cached.cabysMap || {};
-      state.selectedCategory = 'ALL';
-      selectInitialClient();
-      renderCategoryChips();
-      applyFilters();
-      return true;
-    }
-    if (strict) throw e;
-    return false;
-  }
-}
-
 function showAppForSeller() {
   document.getElementById('login-overlay')?.classList.add('hidden');
   const pill = document.getElementById('header-seller-name');
   if (pill) pill.textContent = state.vendedor.codigo;
   const btn = document.getElementById('btn-seller');
   if (btn) btn.title = `${state.vendedor.nombre || ''} (${state.vendedor.codigo}) - Salir`;
-  // Maestros con la URL ya disponible (login manual o config) para nombrar chips
-  loadMaestros();
 }
 
 async function loginVendedor() {
@@ -400,7 +398,11 @@ async function confirmDownloadRoute() {
   if (re) re.classList.add('hidden');
   try {
     state.vendedor = { ...state.pendingVendor };
-    applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo));
+    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS" };
+    applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo, (t) => {
+      if (btn) btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>Descargando ${names[t] || t}...</span>`;
+    }));
+    await loadMaestros();
     saveVendorSession();
     resetLoginSteps();
     showAppForSeller();
@@ -1026,9 +1028,24 @@ async function testSheetsConnection() {
 }
 
 /**
- * Recarga de datos
+ * Recarga de datos (solo a petición del botón Actualizar).
  */
 async function reloadCatalogData() {
+  if (state.vendedor) {
+    if (state.sheetsUrl && navigator.onLine) {
+      try {
+        applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo));
+        await loadMaestros();
+      } catch (e) {
+        console.warn("reload:", e);
+        const c = document.getElementById('catalog-counter');
+        if (c) c.textContent = 'Sin conexión: mostrando datos guardados';
+      }
+    } else {
+      applyFilters();
+    }
+    return;
+  }
   await loadCatalogData();
   applyFilters();
 }
@@ -1070,11 +1087,6 @@ function setupEventListeners() {
       if (tag !== "TEXTAREA") loginVendedor();
     }
   });
-  // Segundo plano: al volver a la app, refrescar la ruta en silencio
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) backgroundRefreshVendor();
-  });
-  window.addEventListener('online', () => backgroundRefreshVendor());
   // Cerrar menú al tocar fuera
   document.addEventListener('click', (e) => {
     const menu = document.getElementById('app-menu');
@@ -1084,61 +1096,4 @@ function setupEventListeners() {
       }
     }
   });
-}
-
-/**
- * Refresco en segundo plano con la sesión guardada (sin pedir login).
- * Solo actualiza si cambian cantidades o existencias, para no interrumpir.
- */
-function stockSignature(products) {
-  let sum = 0;
-  for (const p of (products || [])) {
-    const v = parseFloat(p.pro_invent || 0);
-    if (!isNaN(v)) sum += v;
-  }
-  return `${(products || []).length}|${Math.round(sum)}`;
-}
-
-async function backgroundRefreshVendor() {
-  if (!state.vendedor || !state.sheetsUrl || !navigator.onLine || state._bgRefreshing) return;
-  if (!document.getElementById('login-overlay')?.classList.contains('hidden')) return;
-  if (!document.getElementById('client-modal')?.classList.contains('hidden')) return;
-  if (!document.getElementById('zoom-modal')?.classList.contains('hidden')) return;
-  let last = 0;
-  try { last = parseInt(localStorage.getItem('ecomdx_vendor_refresh_ts') || '0', 10) || 0; } catch (e) {}
-  if (Date.now() - last < 15 * 60 * 1000) return;
-  state._bgRefreshing = true;
-  try {
-    const cat = await downloadVendorCatalog(state.vendedor.codigo);
-    try { localStorage.setItem('ecomdx_vendor_refresh_ts', String(Date.now())); } catch (e) {}
-    if (stockSignature(cat.products) !== stockSignature(state.products)
-      || cat.clients.length !== state.clients.length) {
-      state.products = cat.products || [];
-      state.clients = cat.clients || [];
-      state.discounts = cat.discounts || [];
-      state.cabysMap = cat.cabysMap || {};
-      try {
-        localStorage.setItem('ecomdx_vendor_catalog', JSON.stringify({
-          vendor: state.vendedor.codigo,
-          ts: new Date().toISOString(),
-          catalog: cat
-        }));
-      } catch (e) {}
-      // Conservar el cliente actual si sigue en la ruta
-      const keep = state.currentClient && cat.clients.some(c => String(c.cli_codigo).trim() === String(state.currentClient.cli_codigo).trim());
-      if (!keep) state.selectedCategory = 'ALL';
-      if (keep) {
-        const fresh = cat.clients.find(c => String(c.cli_codigo).trim() === String(state.currentClient.cli_codigo).trim());
-        if (fresh) setClient(fresh);
-      } else {
-        selectInitialClient();
-      }
-      renderCategoryChips();
-      applyFilters();
-    }
-  } catch (e) {
-    console.warn("bg refresh:", e);
-  } finally {
-    state._bgRefreshing = false;
-  }
 }

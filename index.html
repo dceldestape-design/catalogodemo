@@ -31,7 +31,7 @@
           <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center text-white shadow-md shadow-blue-500/25">
             <i class="fa-solid fa-layer-group text-sm"></i>
           </div>
-          <div class="hidden xs:block">
+          <div class="hidden min-[380px]:block">
             <h1 class="text-sm font-extrabold text-slate-900 leading-tight">EcomDx</h1>
             <span class="text-[10px] font-semibold text-blue-600 uppercase tracking-wider">Catálogo Preventa</span>
           </div>
@@ -134,7 +134,7 @@
   </header>
 
   <!-- Main Catalog Grid Area -->
-  <main class="max-w-7xl mx-auto px-3 sm:px-6 py-4 flex-1 w-full">
+  <main class="max-w-7xl mx-auto px-3 sm:px-6 pt-4 pb-10 flex-1 w-full" style="padding-bottom: calc(2.5rem + env(safe-area-inset-bottom));">
     
     <!-- Empty / Notification State -->
     <div id="catalog-empty-state" class="hidden text-center py-16 px-4 bg-white rounded-3xl border border-slate-200 max-w-md mx-auto my-8">
@@ -158,9 +158,7 @@
   <div id="login-overlay" class="fixed inset-0 z-[60] bg-slate-900/95 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
     <div class="bg-white rounded-2xl w-full max-w-sm p-6 shadow-2xl my-auto">
       <div class="text-center mb-4">
-        <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 flex items-center justify-center text-white text-2xl mx-auto mb-2">
-          <i class="fa-solid fa-id-badge"></i>
-        </div>
+        <img src="../images/logo.png" alt="Distribuciones Castro" class="w-20 h-20 rounded-full object-cover mx-auto mb-2 shadow-md">
         <h2 class="text-base font-extrabold text-slate-900">Acceso Vendedor</h2>
         <p class="text-xs text-slate-500">Ingresa con tu código de vendedor</p>
       </div>
