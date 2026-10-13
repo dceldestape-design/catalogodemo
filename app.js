@@ -37,6 +37,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { toggleCart(false); closeOffer(); }
+    const modal = document.getElementById('cc-offer');
+    if (modal && !modal.classList.contains('hidden')) {
+      if (e.key === 'ArrowLeft') moveOffer(-1);
+      if (e.key === 'ArrowRight') moveOffer(1);
+    }
   });
 });
 
@@ -185,13 +190,33 @@ function openOffer() {
   const img = document.getElementById('cc-offer-image');
   const t = document.getElementById('cc-offer-title');
   const cta = document.getElementById('cc-offer-cta');
-  if (img) img.src = offer.image;
+  
+  if (img) {
+    state.offerImages = parseOfferImages(offer.image);
+    state.offerIdx = 0;
+    showOfferImage();
+    enableOfferSwipe();
+  }
   if (t) t.textContent = offer.title || 'Oferta especial';
   if (cta) cta.textContent = offer.cta || 'Ver productos';
   if (modal) {
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
   }
+}
+
+function parseOfferImages(raw) {
+  return String(raw || '')
+    .split(/[,\n]+/)
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(u => {
+      // Si es un enlace de Google Drive con sz=w..., asegurar alta resolución (w2000)
+      if (u.includes('drive.google.com') && u.includes('sz=w')) {
+        return u.replace(/sz=w\d+/, 'sz=w2000');
+      }
+      return u;
+    });
 }
 
 function renderGrid() {
@@ -324,7 +349,7 @@ function maybeOffer() {
   const cta = document.getElementById('cc-offer-cta');
 
   if (img) {
-    state.offerImages = String(offer.image || '').split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
+    state.offerImages = parseOfferImages(offer.image);
     state.offerIdx = 0;
     showOfferImage();
     img.onerror = () => {
@@ -348,16 +373,25 @@ function showOfferImage() {
   if (!imgs.length) return;
   state.offerIdx = Math.max(0, Math.min(state.offerIdx || 0, imgs.length - 1));
   const img = document.getElementById('cc-offer-image');
-  if (img) img.src = imgs[state.offerIdx];
+  if (img) {
+    img.src = imgs[state.offerIdx];
+  }
   const prev = document.getElementById('cc-offer-prev');
   const next = document.getElementById('cc-offer-next');
+  const counter = document.getElementById('cc-offer-counter');
   const multi = imgs.length > 1;
+
   if (prev) { prev.classList.toggle('hidden', !multi); prev.classList.toggle('flex', multi); }
   if (next) { next.classList.toggle('hidden', !multi); next.classList.toggle('flex', multi); }
+  if (counter) {
+    counter.classList.toggle('hidden', !multi);
+    counter.textContent = `${state.offerIdx + 1} / ${imgs.length}`;
+  }
+
   const dots = document.getElementById('cc-offer-dots');
   if (dots) {
     dots.innerHTML = multi ? imgs.map((_, i) =>
-      `<button onclick="showOfferAt(${i})" aria-label="Imagen ${i + 1}" class="h-1.5 rounded-full transition-all ${i === state.offerIdx ? 'w-5 bg-white' : 'w-1.5 bg-white/50'}"></button>`
+      `<button onclick="showOfferAt(${i})" aria-label="Imagen ${i + 1}" class="h-2 rounded-full transition-all duration-200 ${i === state.offerIdx ? 'w-6 bg-white shadow-sm' : 'w-2 bg-white/50 hover:bg-white/80'}"></button>`
     ).join('') : '';
   }
 }
