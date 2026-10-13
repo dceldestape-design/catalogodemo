@@ -1,15 +1,14 @@
 /**
- * EcomDx Preventa - Service Worker for Offline Catalog Navigation
- * App 100% móvil y offline: shell + datos + fotos vistas quedan en caché.
- * Todos los archivos están dentro de la misma carpeta preventa-app/.
+ * Catálogo Cliente DHC4 - Service Worker
+ * 100% Offline: Shell, datos base, estilos, CDNs y fotos en caché local.
  */
-const CACHE_NAME = 'ecomdx-preventa-v1.3';
+const CACHE_NAME = 'cat-cliente-dhc4-v2.0';
 const ASSETS_TO_CACHE = [
   './index.html',
   './styles.css',
+  './config.js',
   './app.js',
   './manifest.json',
-  './catalog_data.js',
   './logo.png',
   './icon-192.png',
   './icon-512.png',
@@ -20,9 +19,8 @@ const OFFLINE_LOGO = './logo.png';
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      // addAll falla si algún recurso no existe; usamos add individual para tolerar errores
       return Promise.allSettled(
-        ASSETS_TO_CACHE.map(url => cache.add(url).catch(() => null))
+        ASSETS_TO_CACHE.map((url) => cache.add(url).catch(() => null))
       );
     }).then(() => self.skipWaiting())
   );
@@ -46,14 +44,18 @@ self.addEventListener('fetch', (event) => {
   const req = event.request;
   if (req.method !== 'GET') return;
 
-  // Fotos de productos: cache-first (funcionan sin red si ya se vieron una vez)
+  const url = new URL(req.url);
+
+  // Imágenes: Cache-first
   if (req.destination === 'image') {
     event.respondWith(
       caches.match(req).then((hit) => {
         if (hit) return hit;
         return fetch(req).then((res) => {
-          const copy = res.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          if (res && res.status === 200) {
+            const copy = res.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          }
           return res;
         }).catch(() => caches.match(OFFLINE_LOGO));
       })
@@ -61,11 +63,48 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Navegación y demás: network-first con fallback a caché
-  event.respondWith(
-    fetch(req).catch(() => {
-      return caches.match(req).then((hit) => {
+  // CDNs externos (Tailwind, FontAwesome, Google Fonts): Cache-first
+  if (url.origin.includes('cdn.tailwindcss.com') ||
+      url.origin.includes('cdnjs.cloudflare.com') ||
+      url.origin.includes('fonts.googleapis.com') ||
+      url.origin.includes('fonts.gstatic.com')) {
+    event.respondWith(
+      caches.match(req).then((hit) => {
         if (hit) return hit;
+        return fetch(req).then((res) => {
+          if (res && (res.status === 200 || res.type === 'opaque')) {
+            const copy = res.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+          }
+          return res;
+        }).catch(() => null);
+      })
+    );
+    return;
+  }
+
+  // Scripts, estilos y documentos locales: Cache-first con actualización
+  event.respondWith(
+    caches.match(req).then((cached) => {
+      if (cached) {
+        // En background actualizamos el caché si hay red
+        fetch(req).then((networkRes) => {
+          if (networkRes && networkRes.status === 200) {
+            caches.open(CACHE_NAME).then((cache) => cache.put(req, networkRes));
+          }
+        }).catch(() => {});
+        return cached;
+      }
+      return fetch(req).then((networkRes) => {
+        if (networkRes && networkRes.status === 200) {
+          const copy = networkRes.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(req, copy));
+        }
+        return networkRes;
+      }).catch(() => {
+        if (req.mode === 'navigate') {
+          return caches.match('./index.html');
+        }
         return caches.match(req, { ignoreSearch: true });
       });
     })

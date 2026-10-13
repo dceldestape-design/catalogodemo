@@ -1,1103 +1,399 @@
 /**
- * EcomDx Preventa - Main Application Engine
+ * Catálogo Cliente DHC4 - 100% Offline Engine
+ * Carga de datos local-first sin descargas bloqueantes al iniciar.
  */
+const state = { catalog: null, cart: {}, gsUrl: "", vendor: "", isSyncing: false };
 
-// Global State
-let state = {
-  products: [],
-  clients: [],
-  discounts: [],
-  cabysMap: {},
-  images: {},
-  maestros: { proveedores: {}, categorias: {} },
-  vendedor: null,
-  pendingVendor: null,
-  selectedSupplier: 'ALL',
-  sheetsUrl: "",
-  currentClient: null,
-  selectedCategory: 'ALL',
-  searchQuery: '',
-  deferredPrompt: null,
-  zoomLevel: 1
-};
+// Registro de Service Worker para PWA Offline (solo en http/https)
+if ('serviceWorker' in navigator && (window.location.protocol === 'http:' || window.location.protocol === 'https:')) {
+  navigator.serviceWorker.register('./sw.js')
+    .then(() => console.log('SW Catálogo Cliente DHC4 activo (modo offline habilitado).'))
+    .catch((err) => console.log('SW error:', err));
+}
 
-// Format currency in Costa Rican Colones (₡)
-const formatColones = (num) => {
-  return '₡ ' + Math.round(num).toLocaleString('es-CR');
-};
-
-// Initialize Application
 document.addEventListener('DOMContentLoaded', async () => {
-  initPWA();
-  await loadCatalogData();
-  // El login siempre se exige, haya o no datos (ej. repo sin bundle aún)
-  try { requireLogin(); } catch (e) { console.warn("login init:", e); }
-  setupEventListeners();
+  const q = new URLSearchParams(window.location.search);
+  state.vendor = (q.get('v') || window.CC_VENDOR || "DHC4").trim().toUpperCase();
+  state.gsUrl = (q.get('gs') || window.CC_GSURL || "").trim();
+
+  // Enlaces viejos sin gs: reutilizar el último GS usado por este vendedor
+  if (!state.gsUrl && state.vendor) {
+    try { state.gsUrl = localStorage.getItem('cc_gs_' + state.vendor) || ""; } catch (e) {}
+  }
+
+  // Restaurar carrito guardado
+  try {
+    const raw = localStorage.getItem('cc_cart_' + state.vendor);
+    if (raw) state.cart = JSON.parse(raw) || {};
+  } catch (e) {}
+
+  // 1. CARGA INMEDIATA OFFLINE (0 ms de espera)
+  loadCatalogOfflineFirst();
+
+  // 2. Consulta en segundo plano si hay conexión (no bloquea al usuario)
+  if (navigator.onLine && state.gsUrl) {
+    syncCatalogInBackground();
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { toggleCart(false); closeOffer(); }
+  });
 });
 
 /**
- * PWA Service Worker & Install Prompt
+ * Carga Local-First: lee únicamente del almacenamiento local guardado.
  */
-function initPWA() {
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./sw.js')
-      .then(() => console.log('Service Worker registrado correctamente para modo offline.'))
-      .catch((e) => console.log('Service Worker error:', e));
-  }
+function loadCatalogOfflineFirst() {
+  const empty = document.getElementById('cc-empty');
+  const loading = document.getElementById('cc-loading');
 
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    state.deferredPrompt = e;
-    const btn = document.getElementById('menu-install');
-    if (btn) btn.classList.remove('hidden');
-  });
+  let data = null;
 
-  window.addEventListener('appinstalled', () => {
-    console.log('EcomDx Preventa instalada como App nativa');
-    const btn = document.getElementById('menu-install');
-    if (btn) btn.classList.add('hidden');
-  });
-}
-
-/**
- * Menú móvil (⋯): abre/cierra. Cierra con Escape o toque fuera.
- */
-function toggleMenu(forceClose) {
-  const menu = document.getElementById('app-menu');
-  if (!menu) return;
-  if (forceClose === true) {
-    menu.classList.add('hidden');
-    return;
-  }
-  menu.classList.toggle('hidden');
-}
-
-function installPWA() {
-  if (state.deferredPrompt) {
-    state.deferredPrompt.prompt();
-    state.deferredPrompt.userChoice.then((choice) => {
-      if (choice.outcome === 'accepted') {
-        console.log('Usuario aceptó instalar la PWA');
-      }
-      state.deferredPrompt = null;
-    });
-  }
-}
-
-/**
- * Carga de datos del catálogo (Local Storage o Bundle)
- */
-async function loadCatalogData() {
+  // Almacenamiento local del navegador
   try {
-    // 1. Catálogo publicado más recientemente por el administrador
-    const published = localStorage.getItem('ecomdx_published_catalog');
-    if (published) {
-      const data = JSON.parse(published);
-      applyLoadedData(data);
-      return;
-    }
-
-    // 2. Modo autónomo sin servidor (doble-clic directo a index.html o app offline)
-    if (window.ECOMDX_CATALOG_DATA) {
-      applyLoadedData(window.ECOMDX_CATALOG_DATA);
-      return;
-    }
-
-    // 3. Fallback a fetch por si corre en hosting HTTP
-    const res = await fetch('./catalog_data.js');
-    if (res.ok) {
-      // catalog_data.js define window.ECOMDX_CATALOG_DATA; evaluar y volver a intentar
-      const text = await res.text();
-      try { eval(text); } catch(e) {} // eslint-disable-line no-eval
-      if (window.ECOMDX_CATALOG_DATA) {
-        applyLoadedData(window.ECOMDX_CATALOG_DATA);
-      }
-      return;
-    }
-  } catch (err) {
-    console.warn("Error cargando datos:", err);
-  }
-}
-
-function applyLoadedData(data) {
-  state.products = data.products || [];
-  state.clients = data.clients || [];
-  state.discounts = data.discounts || [];
-  state.cabysMap = data.cabysMap || {};
-
-  // URL del Sheet publicada por el Admin (viaja en el catálogo, no en código)
-  if (data.config && data.config.sheetsUrl) {
-    state.sheetsUrl = String(data.config.sheetsUrl).trim();
-    try { localStorage.setItem('ecomdx_sheets_url', state.sheetsUrl); } catch (e) {}
-  }
-  // Maestros de proveedores/categorías (nombres del Sheet, códigos del ERP)
-  if (data.config && data.config.maestros) {
-    state.maestros = {
-      proveedores: data.config.maestros.proveedores || {},
-      categorias: data.config.maestros.categorias || {}
-    };
-  }  if (!state.sheetsUrl) {
-    try { state.sheetsUrl = localStorage.getItem('ecomdx_sheets_url') || ''; } catch (e) {}
-  }
-  const manualUrl = (document.getElementById('login-sheets-url')?.value || "").trim();
-  if (manualUrl) state.sheetsUrl = manualUrl;
-  const wrap = document.getElementById('login-sheets-wrap');
-  if (wrap) wrap.classList.toggle('hidden', !!state.sheetsUrl);
-  
-  // Mapeo de fotos: fusionar base del bundle con guardadas
-  const baseImages = data.sampleImages || data.images || {};
-  let saved = {};
-  try {
-    const savedImages = localStorage.getItem('ecomdx_images');
-    if (savedImages) saved = JSON.parse(savedImages) || {};
-  } catch (e) { saved = {}; }
-  state.images = { ...baseImages, ...saved };
-  if (Object.keys(state.images).length > Object.keys(saved).length) {
-    try { localStorage.setItem('ecomdx_images', JSON.stringify(state.images)); } catch (e) {}
-  }
-
-  // Establecer cliente inicial
-  selectInitialClient();
-  renderCategoryChips();
-  applyFilters();
-  // Puerta de acceso por vendedor (verificada en el Sheet)
-  requireLogin();
-}
-
-/**
- * Lee Proveedores/Categorias directo del Sheet para no depender del publicado.
- */
-async function loadMaestros() {
-  if (!state.sheetsUrl) return;
-  try {
-    const res = await fetch(`${state.sheetsUrl}?action=get_maestros`);
-    const json = await res.json();
-    if (json.status === "success" && json.maestros) {
-      const has = Object.keys(json.maestros.proveedores || {}).length + Object.keys(json.maestros.categorias || {}).length;
-      if (has > 0) {
-        state.maestros = {
-          proveedores: json.maestros.proveedores || {},
-          categorias: json.maestros.categorias || {}
-        };
-        renderCategoryChips();
-        applyFilters();
-      }
+    const cached = localStorage.getItem('cc_catalog_' + state.vendor);
+    if (cached) {
+      data = JSON.parse(cached);
     }
   } catch (e) {
-    console.warn("maestros:", e);
-  }
-}
-
-/**
- * Acceso por código de vendedor. Permisos verificados en el servidor (Code.gs),
- * las contraseñas nunca se descargan al teléfono.
- */
-function getStoredSession() {
-  try {
-    const raw = localStorage.getItem('ecomdx_vendedor_session');
-    if (raw) return JSON.parse(raw);
-  } catch (e) {}
-  return null;
-}
-
-function requireLogin() {
-  const s = getStoredSession();
-  if (s && s.codigo) {
-    state.vendedor = s;
-    showAppForSeller();
-    // Sin descargas automáticas: usa la ruta guardada o el paquete base
-    restoreVendorCache();
-  } else {
-    state.vendedor = null;
-    document.getElementById('login-overlay')?.classList.remove('hidden');
-    // Primera vez sin URL: abrir Configuración para pegarla
-    if (!state.sheetsUrl) openConfigModal();
-  }
-}
-
-// Restaura la ruta guardada del vendedor (sin red). Si no hay, queda el paquete base.
-function restoreVendorCache() {
-  const cached = getVendorCache(state.vendedor.codigo);
-  if (!cached) return false;
-  state.products = cached.products || [];
-  state.clients = cached.clients || [];
-  state.discounts = cached.discounts || [];
-  state.cabysMap = cached.cabysMap || {};
-  state.selectedCategory = 'ALL';
-  selectInitialClient();
-  renderCategoryChips();
-  applyFilters();
-  return true;
-}
-
-/**
- * Descarga el catálogo propio del vendedor vía Sheet (action=fetch&v=).
- * El Sheet usa el link api_<tipo>_<VENDEDOR> con su usuario=, o el genérico.
- */
-async function fetchVendorType(type, vendor) {
-  const res = await fetch(`${state.sheetsUrl}?action=fetch&type=${type}&v=${encodeURIComponent(vendor)}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
-  if (json.status !== "success" || !Array.isArray(json.items)) {
-    throw new Error((json && json.message) || "Respuesta inválida del Sheet");
-  }
-  return json.items;
-}
-
-async function downloadVendorCatalog(vendor, onProgress) {
-  // Secuencial con reintentos: evita saturar al Sheet y no trunca a la primera falla
-  const order = ["products", "clients", "discounts", "cabys"];
-  const got = {};
-  for (const t of order) {
-    let lastErr = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        if (onProgress) onProgress(t, attempt);
-        got[t] = await fetchVendorType(t, vendor);
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e;
-        await new Promise(r => setTimeout(r, 1200 * attempt));
-      }
-    }
-    if (lastErr) throw new Error(`${t}: ${lastErr.message}`);
-  }
-  const cabysMap = {};
-  got.cabys.forEach(c => { if (c && c.pro_codecom) cabysMap[String(c.pro_codecom).trim()] = c; });
-  return { products: got.products, clients: got.clients, discounts: got.discounts, cabysMap };
-}
-
-function getVendorCache(vendor) {
-  try {
-    const raw = localStorage.getItem('ecomdx_vendor_catalog');
-    if (raw) {
-      const j = JSON.parse(raw);
-      if (j && String(j.vendor || "").toUpperCase() === String(vendor || "").toUpperCase() && j.catalog) return j.catalog;
-    }
-  } catch (e) {}
-  return null;
-}
-
-function applyVendorCatalog(cat) {
-  state.products = cat.products || [];
-  state.clients = cat.clients || [];
-  state.discounts = cat.discounts || [];
-  state.cabysMap = cat.cabysMap || {};
-  try {
-    localStorage.setItem('ecomdx_vendor_catalog', JSON.stringify({
-      vendor: state.vendedor.codigo,
-      ts: new Date().toISOString(),
-      catalog: cat
-    }));
-  } catch (e) {}
-  state.selectedCategory = 'ALL';
-  selectInitialClient();
-  renderCategoryChips();
-  applyFilters();
-}
-
-function showAppForSeller() {
-  document.getElementById('login-overlay')?.classList.add('hidden');
-  const pill = document.getElementById('header-seller-name');
-  if (pill) pill.textContent = state.vendedor.codigo;
-  const btn = document.getElementById('btn-seller');
-  if (btn) btn.title = `${state.vendedor.nombre || ''} (${state.vendedor.codigo}) - Salir`;
-}
-
-async function loginVendedor() {
-  const login = (document.getElementById('login-code')?.value || "").trim();
-  const password = (document.getElementById('login-password')?.value || "");
-  const err = document.getElementById('login-error');
-  const showErr = (m) => { if (err) { err.textContent = m; err.classList.remove('hidden'); } };
-  if (err) err.classList.add('hidden');
-
-  const manualUrl = (document.getElementById('login-sheets-url')?.value || "").trim();
-  if (manualUrl) {
-    state.sheetsUrl = manualUrl;
-    try { localStorage.setItem('ecomdx_sheets_url', manualUrl); } catch (e) {}
-  }
-  if (!login || !password) { showErr("Ingresa tu código y contraseña."); return; }
-  if (!state.sheetsUrl) {
-    showErr("Falta la URL del sistema. Pégala en la ventana de Configuración.");
-    openConfigModal();
-    return;
-  }
-  if (!navigator.onLine) { showErr("Sin conexión: el primer ingreso requiere internet. Luego funciona offline."); return; }
-
-  const btn = document.getElementById('btn-login');
-  if (btn) btn.disabled = true;
-  try {
-    const res = await fetch(state.sheetsUrl, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ action: "login", login, password })
-    });
-    const json = await res.json();
-    if (json.status !== "success" || !json.vendedor) {
-      throw new Error((json && json.message) || "Acceso denegado.");
-    }
-    state.vendedor = {
-      codigo: json.vendedor.codigo,
-      nombre: json.vendedor.nombre,
-      usuario: json.vendedor.usuario
-    };
-    const pw = document.getElementById('login-password');
-    if (pw) pw.value = "";
-    // Credenciales válidas: ahora el preventa decide si actualiza su ruta o usa caché
-    state.pendingVendor = { ...state.vendedor };
-    state.vendedor = null;
-    showRouteChoice();
-  } catch (e) {
-    console.warn("login:", e);
-    showErr(e.message || "No se pudo validar el acceso.");
-  } finally {
-    if (btn) {
-      btn.disabled = false;
-      btn.innerHTML = `<i class="fa-solid fa-right-to-bracket"></i><span>Ingresar</span>`;
-    }
-  }
-}
-
-/**
- * Paso 2 del ingreso: el preventa decide si actualiza su ruta o usa la caché.
- */
-function showRouteChoice() {
-  document.getElementById('login-step-1')?.classList.add('hidden');
-  document.getElementById('login-step-2')?.classList.remove('hidden');
-  const re = document.getElementById('login-route-error');
-  if (re) re.classList.add('hidden');
-  const name = document.getElementById('login-seller-name');
-  if (name && state.pendingVendor) {
-    name.textContent = `${state.pendingVendor.nombre || ''} (${state.pendingVendor.codigo})`.trim();
-  }
-  const info = document.getElementById('login-cache-info');
-  if (info && state.pendingVendor) {
-    let cacheTs = null;
-    try {
-      const raw = localStorage.getItem('ecomdx_vendor_catalog');
-      if (raw) {
-        const j = JSON.parse(raw);
-        if (j && String(j.vendor || "").toUpperCase() === String(state.pendingVendor.codigo || "").toUpperCase()) cacheTs = j.ts;
-      }
-    } catch (e) {}
-    info.textContent = cacheTs
-      ? `Tienes datos guardados (${new Date(cacheTs).toLocaleString()}). Puedes usarlos sin descargar.`
-      : `Aún no tienes datos guardados en este equipo: debes actualizar tu ruta.`;
-  }
-}
-
-function saveVendorSession() {
-  state.vendedor = { ...state.pendingVendor, ts: new Date().toISOString() };
-  try { localStorage.setItem('ecomdx_vendedor_session', JSON.stringify(state.vendedor)); } catch (e) {}
-  state.pendingVendor = null;
-}
-
-async function confirmDownloadRoute() {
-  if (!state.pendingVendor) return;
-  const btn = document.getElementById('btn-download-route');
-  const original = `<i class="fa-solid fa-cloud-arrow-down"></i><span>Sí, actualizar mi ruta</span>`;
-  if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>Descargando tu ruta...</span>`; }
-  const re = document.getElementById('login-route-error');
-  if (re) re.classList.add('hidden');
-  try {
-    state.vendedor = { ...state.pendingVendor };
-    const names = { products: "productos", clients: "clientes", discounts: "descuentos", cabys: "CABYS" };
-    applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo, (t) => {
-      if (btn) btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i><span>Descargando ${names[t] || t}...</span>`;
-    }));
-    await loadMaestros();
-    saveVendorSession();
-    resetLoginSteps();
-    showAppForSeller();
-  } catch (e) {
-    console.warn("ruta:", e);
-    state.vendedor = null;
-    if (re) { re.textContent = `No se pudo actualizar: ${e.message}. Puedes usar tus datos guardados.`; re.classList.remove('hidden'); }
-  } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = original; }
-  }
-}
-
-function useCachedRoute() {
-  if (!state.pendingVendor) return;
-  const cached = getVendorCache(state.pendingVendor.codigo);
-  const re = document.getElementById('login-route-error');
-  if (!cached) {
-    if (re) { re.textContent = "No hay datos guardados de tu ruta en este equipo. Elige actualizar."; re.classList.remove('hidden'); }
-    return;
-  }
-  state.vendedor = { ...state.pendingVendor };
-  state.products = cached.products || [];
-  state.clients = cached.clients || [];
-  state.discounts = cached.discounts || [];
-  state.cabysMap = cached.cabysMap || {};
-  state.selectedCategory = 'ALL';
-  saveVendorSession();
-  resetLoginSteps();
-  showAppForSeller();
-  selectInitialClient();
-  renderCategoryChips();
-  applyFilters();
-}
-
-function resetLoginSteps() {
-  document.getElementById('login-step-2')?.classList.add('hidden');
-  document.getElementById('login-step-1')?.classList.remove('hidden');
-}
-
-function logoutVendedor() {
-  if (!confirm("¿Cerrar sesión de vendedor?")) return;
-  try { localStorage.removeItem('ecomdx_vendedor_session'); } catch (e) {}
-  state.vendedor = null;
-  state.pendingVendor = null;
-  resetLoginSteps();
-  document.getElementById('login-overlay')?.classList.remove('hidden');
-}
-
-/**
- * Selecciona cliente inicial (por URL param o primer cliente)
- */
-function selectInitialClient() {
-  const urlParams = new URLSearchParams(window.location.search);
-  const clientCode = urlParams.get('clientCode') || localStorage.getItem('ecomdx_selected_client_code');
-
-  if (clientCode) {
-    const found = state.clients.find(c => String(c.cli_codigo).trim() === String(clientCode).trim());
-    if (found) {
-      setClient(found);
-      return;
-    }
+    console.warn("Error leyendo cc_catalog:", e);
   }
 
-  // Por defecto el primer cliente (ej: SUPER OSO)
-  if (state.clients.length > 0) {
-    setClient(state.clients[0]);
-  }
-}
-
-function setClient(client) {
-  state.currentClient = client;
-  localStorage.setItem('ecomdx_selected_client_code', client.cli_codigo);
-
-  // Actualizar Header
-  document.getElementById('header-client-code').textContent = `${client.cli_codigo}`;
-  document.getElementById('header-client-name').textContent = client.cli_nombre;
-  
-  const listNum = String(client.cli_lista || '1').trim();
-  const listBadge = document.getElementById('header-client-list-badge');
-  listBadge.textContent = `L${listNum}`;
-
-  // Actualizar Chips de Categoría y Productos
-  state.selectedCategory = 'ALL';
-  state.selectedSupplier = 'ALL';
-  renderCategoryChips();
-  applyFilters();
-}
-
-/**
- * Reglas de Negocio Centrales:
- * 1. Ocultar productos sin stock (pro_invent <= 0).
- * 2. Ocultar productos que no tengan la lista asignada del cliente (cli_lista).
- * 3. Calcular la suma de descuentos (cli_descue + des_descto comercial).
- * 4. Obtener IVA oficial de CABYS.
- */
-function getClientVisibleProducts() {
-  if (!state.currentClient) return [];
-
-  const clientList = String(state.currentClient.cli_lista || '1').trim();
-  const clientBaseDiscount = parseFloat(state.currentClient.cli_descue || 0);
-
-  return state.products
-    .filter(p => {
-      // Regla 1: Stock > 0
-      const stock = parseFloat(p.pro_invent || 0);
-      if (stock <= 0) return false;
-
-      // Regla 2: Producto debe tener precio en la lista asignada del cliente
-      const listas = p.pro_listas || [];
-      const hasListPrice = listas.some(l => 
-        String(l.det_lista).trim() === clientList && parseFloat(l.det_valor || 0) > 0
-      );
-
-      return hasListPrice;
-    })
-    .map(p => {
-      // Extraer precio de la lista del cliente
-      const listaObj = p.pro_listas.find(l => String(l.det_lista).trim() === clientList);
-      const basePrice = parseFloat(listaObj.det_valor || 0);
-
-      // Regla 3: Descuento comercial aplicable
-      const commercialDiscount = getCommercialDiscount(p, state.currentClient);
-      const totalDiscountPercent = clientBaseDiscount + commercialDiscount;
-
-      // Precios calculados
-      // Fórmula sin descuento: valor + %IVA
-      // Fórmula con descuento: (valor - %descuento) + %IVA
-      // Todos los precios mostrados integran ya el IVA (IVAI)
-      const discountAmount = basePrice * (totalDiscountPercent / 100);
-      const netPrice = Math.max(0, basePrice - discountAmount);
-
-      // Regla 4: IVA desde CABYS
-      const cabysEntry = state.cabysMap[String(p.pro_codigo).trim()];
-      const ivaPercent = cabysEntry && cabysEntry.pro_poriva !== undefined 
-        ? parseFloat(cabysEntry.pro_poriva) 
-        : parseFloat(p.pro_iva || 13);
-
-      const basePriceWithIva = basePrice * (1 + ivaPercent / 100);
-      const netPriceWithIva = netPrice * (1 + ivaPercent / 100);
-
-      return {
-        ...p,
-        calc: {
-          clientList,
-          basePrice,
-          basePriceWithIva,
-          clientBaseDiscount,
-          commercialDiscount,
-          totalDiscountPercent,
-          netPrice,
-          netPriceWithIva,
-          ivaPercent,
-          cabysCode: cabysEntry ? cabysEntry.pro_cabys : (p.pro_cabys || 'Pendiente')
-        }
-      };
-    });
-}
-
-/**
- * Jerarquías del ERP (vienen como arreglo de 1 objeto) + nombres de maestros.
- */
-function prodJer(p) {
-  const j = p && p.pro_jerarquias;
-  if (Array.isArray(j)) return j[0] || {};
-  return j || {};
-}
-function provCode(p) { return String(prodJer(p).det_provee || "").trim(); }
-function catCode(p) { return String(prodJer(p).det_catego || "").trim(); }
-function provName(code) { return (state.maestros.proveedores || {})[String(code || "").trim()] || ""; }
-function catName(code) { return (state.maestros.categorias || {})[String(code || "").trim()] || ""; }
-
-/**
- * Busca descuento comercial para el producto y cliente.
- * Cruza jerarquías (det_provee, det_marca, det_catego, det_familia...) con
- * las reglas (des_provee, des_marca, des_catego...).
- */
-function getCommercialDiscount(product, client) {
-  if (!state.discounts || state.discounts.length === 0) return 0;
-
-  const clientCode = String(client.cli_codigo).trim();
-  const jer = prodJer(product);
-  const jval = (k) => String(jer[k] || '').trim();
-
-  // [campo regla, valor producto]
-  const H = [
-    ['des_produc', String(product.pro_codigo).trim()],
-    ['des_provee', jval('det_provee')],
-    ['des_linea', jval('det_linea')],
-    ['des_sublin', jval('det_sublin')],
-    ['des_marca', jval('det_marca')],
-    ['des_submar', jval('det_submar')],
-    ['des_negoci', jval('det_negoci')],
-    ['des_catego', jval('det_catego')],
-    ['des_subcat', jval('det_subcat')],
-    ['des_grupo', jval('det_grupo')],
-    ['des_famili', jval('det_familia') || jval('det_famili')]
-  ];
-
-  let maxDiscount = 0;
-
-  for (const d of state.discounts) {
-    if (d.des_estado && d.des_estado !== 'A') continue;
-
-    // Verificar si aplica al cliente o es general
-    const matchClient = !d.des_client || String(d.des_client).trim() === clientCode;
-    if (!matchClient) continue;
-
-    // Jerarquías especificadas en la regla
-    const scoped = H.filter(([k]) => String(d[k] || '').trim() !== '');
-    // Sin jerarquía = regla general del cliente
-    const matchScope = scoped.length === 0 || scoped.some(([k, pv]) => {
-      const dv = String(d[k] || '').trim();
-      return pv !== '' && dv === pv;
-    });
-    if (!matchScope) continue;
-
-    const discountVal = parseFloat(d.des_descto || 0);
-    if (discountVal > maxDiscount) {
-      maxDiscount = discountVal;
-    }
-  }
-
-  return maxDiscount;
-}
-
-/**
- * Aplica filtros de búsqueda y categoría
- */
-function applyFilters() {
-  const allVisible = getClientVisibleProducts();
-  const search = (document.getElementById('catalog-search-input')?.value || '').toLowerCase().trim();
-  state.searchQuery = search;
-
-  const clearBtn = document.getElementById('btn-clear-search');
-  if (clearBtn) {
-    if (search) clearBtn.classList.remove('hidden');
-    else clearBtn.classList.add('hidden');
-  }
-
-  const filtered = allVisible.filter(p => {
-    // Filtro por proveedor
-    if (state.selectedSupplier !== 'ALL') {
-      if (provCode(p) !== state.selectedSupplier) return false;
-    }
-
-    // Filtro por categoría
-    if (state.selectedCategory !== 'ALL') {
-      if (catCode(p) !== state.selectedCategory) return false;
-    }
-
-    // Filtro por búsqueda
-    if (search) {
-      const nameMatch = String(p.pro_nombre || '').toLowerCase().includes(search);
-      const codeMatch = String(p.pro_codigo || '').toLowerCase().includes(search);
-      const barcodeMatch = p.pro_jerarquias && String(p.pro_jerarquias.det_codbar || '').toLowerCase().includes(search);
-      return nameMatch || codeMatch || barcodeMatch;
-    }
-
+  if (data && data.products && data.products.length > 0) {
+    state.catalog = data;
+    if (loading) loading.classList.add('hidden');
+    if (empty) empty.classList.add('hidden');
+    applyBrand();
+    renderGrid();
+    updateCartBadge();
+    maybeOffer();
     return true;
-  });
+  }
 
-  renderProductsGrid(filtered, allVisible.length);
+  // Si no hay datos en caché, mostrar estado vacío / cargando según corresponda
+  if (empty) {
+    const msg = document.getElementById('cc-empty-msg');
+    if (msg) msg.textContent = "No hay productos disponibles en caché local. Conéctate para sincronizar.";
+    empty.classList.remove('hidden');
+  }
+  return false;
 }
 
 /**
- * Renderiza los Chips de Proveedor y Categoría (con nombres de maestros)
+ * Sincronización en segundo plano: no bloquea ni muestra spinners en la vista principal
  */
-function renderCategoryChips() {
-  const supContainer = document.getElementById('supplier-chips-container');
-  const container = document.getElementById('category-chips-container');
-  if (!container) return;
+async function syncCatalogInBackground() {
+  if (state.isSyncing || !state.gsUrl || !state.vendor) return;
+  state.isSyncing = true;
 
-  const visible = getClientVisibleProducts();
-  const suppliersSet = new Set();
-  const categoriesSet = new Set();
-
-  visible.forEach(p => {
-    const s = provCode(p), c = catCode(p);
-    if (s) suppliersSet.add(s);
-    if (c) categoriesSet.add(c);
-  });
-
-  const suppliers = Array.from(suppliersSet).sort();
-  const categories = Array.from(categoriesSet).sort();
-
-  if (supContainer) {
-    let shtml = `
-      <button onclick="selectSupplier('ALL')" class="category-chip ${state.selectedSupplier === 'ALL' ? 'active bg-slate-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-semibold shrink-0 transition">
-        Prov: Todos
-      </button>
-    `;
-    suppliers.forEach(sup => {
-      const isAct = state.selectedSupplier === sup;
-      const nm = provName(sup);
-      shtml += `
-        <button onclick="selectSupplier('${sup}')" class="category-chip ${isAct ? 'active bg-indigo-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-medium shrink-0 transition">
-          ${nm ? nm : 'Prov ' + sup}
-        </button>
-      `;
-    });
-    supContainer.innerHTML = shtml;
-  }
-
-  let html = `
-    <button onclick="selectCategory('ALL')" class="category-chip ${state.selectedCategory === 'ALL' ? 'active bg-slate-900 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-semibold shrink-0 transition">
-      Todos (${visible.length})
-    </button>
-  `;
-
-  categories.forEach(cat => {
-    const isAct = state.selectedCategory === cat;
-    const nm = catName(cat);
-    html += `
-      <button onclick="selectCategory('${cat}')" class="category-chip ${isAct ? 'active bg-blue-600 text-white' : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'} px-3 py-1 rounded-full text-[11px] font-medium shrink-0 transition">
-        ${nm ? nm : 'Categoría ' + cat}
-      </button>
-    `;
-  });
-
-  container.innerHTML = html;
-}
-
-function selectSupplier(sup) {
-  state.selectedSupplier = sup;
-  renderCategoryChips();
-  applyFilters();
-}
-
-function selectCategory(cat) {
-  state.selectedCategory = cat;
-  renderCategoryChips();
-  applyFilters();
-}
-
-/**
- * Renderiza la cuadrícula de productos
- */
-function renderProductsGrid(products, totalClientProducts) {
-  const grid = document.getElementById('products-grid');
-  const emptyState = document.getElementById('catalog-empty-state');
-  const counter = document.getElementById('catalog-counter');
-
-  if (counter) {
-    counter.textContent = `${products.length} de ${totalClientProducts} productos disponibles`;
-  }
-
-  if (products.length === 0) {
-    grid.innerHTML = '';
-    emptyState.classList.remove('hidden');
-    return;
-  }
-
-  emptyState.classList.add('hidden');
-
-  grid.innerHTML = products.map(p => {
-    const photos = state.images[p.pro_codigo] || [];
-    const photoUrl = photos.length > 0 ? photos[0] : '';
-
-    const calc = p.calc;
-    const hasDiscount = calc.totalDiscountPercent > 0;
-
-    const imgElement = photoUrl 
-      ? `<img src="${photoUrl}" alt="${p.pro_nombre}" loading="lazy" onerror="this.onerror=null;this.src='../images/logo.png'" class="w-full h-full object-contain p-2 group-hover:scale-105 transition duration-300">`
-      : `<div class="w-full h-full flex flex-col items-center justify-center text-slate-300 gap-1 bg-slate-50">
-           <i class="fa-solid fa-box text-3xl"></i>
-           <span class="text-[9px] text-slate-400 font-medium">Foto HD Pendiente</span>
-         </div>`;
-
-    return `
-      <div class="product-card bg-white rounded-2xl border border-slate-200/80 hover:border-blue-400/80 shadow-xs hover:shadow-md transition-all flex flex-col overflow-hidden group">
-        
-        <!-- Image Container (Click opens HD Zoom) -->
-        <div onclick="openZoomModal('${p.pro_codigo}')" class="relative w-full aspect-square bg-white border-b border-slate-100 flex items-center justify-center cursor-pointer overflow-hidden">
-          ${imgElement}
-          
-          <!-- Discount Pill if applicable -->
-          ${hasDiscount ? `
-            <div class="absolute top-2 left-2 badge-discount text-white text-[10px] font-extrabold px-1.5 py-0.5 rounded-md shadow-xs flex items-center gap-1">
-              <i class="fa-solid fa-arrow-down text-[8px]"></i>
-              <span>-${calc.totalDiscountPercent}%</span>
-            </div>
-          ` : ''}
-
-          <!-- Zoom Hint Icon on Hover -->
-          <div class="absolute top-2 right-2 w-7 h-7 rounded-full bg-slate-900/60 backdrop-blur-xs text-white flex items-center justify-center text-[10px] opacity-0 group-hover:opacity-100 transition">
-            <i class="fa-solid fa-magnifying-glass-plus"></i>
-          </div>
-        </div>
-
-        <!-- Product Card Body -->
-        <div class="p-3 flex-1 flex flex-col justify-between">
-          <div>
-            <!-- Code & Category -->
-            <div class="flex items-center justify-between gap-1 text-[10px] text-slate-400 font-mono mb-1">
-              <span class="font-bold text-blue-700 bg-blue-50 px-1 rounded">#${p.pro_codigo}</span>
-              <span class="truncate">CABYS ${calc.cabysCode}</span>
-            </div>
-
-            <!-- Product Title -->
-            <h4 class="text-xs font-bold text-slate-800 line-clamp-2 leading-snug group-hover:text-blue-600 transition" title="${p.pro_nombre}">
-              ${p.pro_nombre}
-            </h4>
-            ${(() => { const pn = provName(provCode(p)), cn = catName(catCode(p)); return (pn || cn) ? `<div class="text-[10px] text-slate-400 truncate mt-0.5">${[pn, cn].filter(Boolean).join(' • ')}</div>` : ''; })()}
-          </div>
-
-          <!-- Pricing Block (Sin descuento: valor + IVA | Con descuento: valor - %dto + IVA, todo IVAI) -->
-          <div class="mt-3 pt-2 border-t border-slate-100">
-            ${hasDiscount ? `
-              <div class="flex items-center justify-between text-[10px] text-slate-400">
-                <span class="line-through">${formatColones(calc.basePriceWithIva)}</span>
-                <span class="text-red-500 font-semibold">${calc.clientBaseDiscount}% + ${calc.commercialDiscount}%</span>
-              </div>
-            ` : ''}
-
-            <div class="flex items-baseline justify-between mt-0.5">
-              <div class="text-sm sm:text-base font-extrabold text-emerald-600">
-                ${formatColones(calc.netPriceWithIva)}
-              </div>
-              <span class="text-[9px] font-semibold text-slate-400 uppercase">IVAI (${calc.ivaPercent}%)</span>
-            </div>
-          </div>
-
-        </div>
-
-      </div>
-    `;
-  }).join('');
-}
-
-/**
- * Modal de Zoom en Alta Definición
- */
-function openZoomModal(productCode) {
-  const visible = getClientVisibleProducts();
-  const product = visible.find(p => String(p.pro_codigo).trim() === String(productCode).trim());
-  if (!product) return;
-
-  const photos = state.images[product.pro_codigo] || [];
-  const photoUrl = photos.length > 0
-    ? photos[0]
-    : '../images/logo.png';
-
-  const modal = document.getElementById('zoom-modal');
-  const img = document.getElementById('modal-image');
-  
-  img.onerror = () => { img.onerror = null; img.src = '../images/logo.png'; };
-  img.src = photoUrl;
-  resetZoom();
-
-  document.getElementById('zoom-product-code').textContent = `#${product.pro_codigo}`;
-  document.getElementById('zoom-product-title').textContent = product.pro_nombre;
-  document.getElementById('zoom-cabys-badge').textContent = product.calc.cabysCode;
-  document.getElementById('zoom-iva-badge').textContent = `${product.calc.ivaPercent}%`;
-  document.getElementById('zoom-price-badge').textContent = `${formatColones(product.calc.netPriceWithIva)} IVAI`;
-
-  modal.classList.remove('hidden');
-}
-
-function closeZoomModal() {
-  document.getElementById('zoom-modal').classList.add('hidden');
-}
-
-function zoomIn() {
-  state.zoomLevel = Math.min(state.zoomLevel + 0.3, 3.5);
-  updateZoom();
-}
-
-function zoomOut() {
-  state.zoomLevel = Math.max(state.zoomLevel - 0.3, 0.8);
-  updateZoom();
-}
-
-function resetZoom() {
-  state.zoomLevel = 1;
-  updateZoom();
-}
-
-function updateZoom() {
-  const img = document.getElementById('modal-image');
-  if (img) img.style.transform = `scale(${state.zoomLevel})`;
-}
-
-/**
- * Modal de Selección de Cliente
- */
-function openClientModal() {
-  document.getElementById('client-modal').classList.remove('hidden');
-  renderClientModalList();
-}
-
-function closeClientModal() {
-  document.getElementById('client-modal').classList.add('hidden');
-}
-
-function renderClientModalList() {
-  const container = document.getElementById('modal-clients-list');
-  if (!container) return;
-
-  const search = (document.getElementById('modal-client-search')?.value || '').toLowerCase().trim();
-
-  // Deduplicar por código (el ERP puede traer el mismo cliente repetido)
-  const seen = new Set();
-  const unique = [];
-  for (const c of state.clients) {
-    const code = String(c.cli_codigo || '').trim();
-    if (!code || seen.has(code)) continue;
-    seen.add(code);
-    unique.push(c);
-  }
-
-  const filtered = unique.filter(c => {
-    if (!search) return true;
-    const nameMatch = String(c.cli_nombre || '').toLowerCase().includes(search);
-    const codeMatch = String(c.cli_codigo || '').toLowerCase().includes(search);
-    const docMatch = String(c.documento || '').toLowerCase().includes(search);
-    return nameMatch || codeMatch || docMatch;
-  });
-
-  container.innerHTML = filtered.slice(0, 40).map(c => {
-    const isCurrent = state.currentClient && state.currentClient.cli_codigo === c.cli_codigo;
-    const listNum = String(c.cli_lista || '1').trim();
-    const discount = parseFloat(c.cli_descue || 0);
-
-    return `
-      <div onclick="selectClientFromModal('${c.cli_codigo}')" class="p-3 hover:bg-blue-50/60 rounded-xl cursor-pointer transition flex items-center justify-between ${isCurrent ? 'bg-blue-50 border border-blue-200' : ''}">
-        <div>
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-extrabold text-slate-900">${c.cli_nombre}</span>
-            ${isCurrent ? '<span class="text-[9px] font-bold bg-blue-600 text-white px-1.5 py-0.2 rounded-full">Activo</span>' : ''}
-          </div>
-          <div class="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
-            <span>Código: ${c.cli_codigo}</span>
-            <span>•</span>
-            <span>Cédula: ${c.documento || '-'}</span>
-          </div>
-        </div>
-        <div class="text-right">
-          <span class="text-xs font-bold text-blue-700 bg-blue-100/70 px-2 py-0.5 rounded-lg">Lista ${listNum}</span>
-          ${discount > 0 ? `<div class="text-[10px] text-red-600 font-semibold mt-0.5">Dto: ${discount}%</div>` : ''}
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
-function selectClientFromModal(clientCode) {
-  const client = state.clients.find(c => c.cli_codigo === clientCode);
-  if (client) {
-    setClient(client);
-    closeClientModal();
-  }
-}
-
-/**
- * Configuración: dirección del Sheet en este equipo (no se borra con la caché).
- */
-function openConfigModal() {
-  const input = document.getElementById('config-sheets-url');
-  if (input) input.value = state.sheetsUrl || "";
-  const info = document.getElementById('config-seller-info');
-  if (info) info.textContent = state.vendedor ? `${state.vendedor.nombre || ''} (${state.vendedor.codigo})` : "Sin sesión";
-  const route = document.getElementById('config-route-info');
-  if (route) {
-    try {
-      const raw = localStorage.getItem('ecomdx_vendor_catalog');
-      if (raw) {
-        const j = JSON.parse(raw);
-        const n = (j.catalog && j.catalog.products || []).length;
-        route.textContent = `${j.vendor || '?'} • ${new Date(j.ts).toLocaleString()} • ${n} prod.`;
-      } else {
-        route.textContent = "Sin ruta guardada (viene del paquete base)";
-      }
-    } catch (e) {
-      route.textContent = "—";
-    }
-  }
-  const st = document.getElementById('config-status');
-  if (st) st.classList.add('hidden');
-  document.getElementById('config-modal')?.classList.remove('hidden');
-}
-
-function closeConfigModal() {
-  document.getElementById('config-modal')?.classList.add('hidden');
-}
-
-function configMsg(text, ok) {
-  const st = document.getElementById('config-status');
-  if (!st) return;
-  st.textContent = text;
-  st.className = ok
-    ? "text-xs font-medium text-emerald-600"
-    : "text-xs font-medium text-rose-600";
-}
-
-function saveSheetsUrl() {
-  const url = (document.getElementById('config-sheets-url')?.value || "").trim();
-  if (!url) { configMsg("Pega la URL del sistema.", false); return; }
-  state.sheetsUrl = url;
-  try { localStorage.setItem('ecomdx_sheets_url', url); } catch (e) {}
-  const loginInput = document.getElementById('login-sheets-url');
-  if (loginInput) loginInput.value = url;
-  const wrap = document.getElementById('login-sheets-wrap');
-  if (wrap) wrap.classList.add('hidden');
-  configMsg("Dirección guardada en este equipo.", true);
-  loadMaestros();
-}
-
-async function testSheetsConnection() {
-  const url = (document.getElementById('config-sheets-url')?.value || "").trim() || state.sheetsUrl;
-  if (!url) { configMsg("Pega la URL primero.", false); return; }
-  configMsg("Probando conexión...", true);
   try {
-    const res = await fetch(`${url}?action=get_maestros`);
+    const res = await fetch(`${state.gsUrl}?action=get_public&v=${encodeURIComponent(state.vendor)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const json = await res.json();
-    if (json.status === "success") {
-      configMsg("Conexión correcta con el Sheet.", true);
-    } else {
-      throw new Error(json.message || "Respuesta inválida");
-    }
+    if (json.status !== "success" || !json.public) throw new Error((json && json.message) || "Sin respuesta");
+
+    state.catalog = json.public;
+    try {
+      localStorage.setItem('cc_catalog_' + state.vendor, JSON.stringify(json.public));
+      localStorage.setItem('cc_gs_' + state.vendor, state.gsUrl);
+    } catch (e) {}
+
+    document.getElementById('cc-loading')?.classList.add('hidden');
+    applyBrand();
+    renderGrid();
+    updateCartBadge();
+    maybeOffer();
   } catch (e) {
-    configMsg(`Sin conexión: ${e.message}`, false);
+    // Si falla en background o no hay internet, no pasa nada porque ya tenemos datos offline
+    console.log("Catálogo en modo local / offline:", e.message || e);
+    document.getElementById('cc-loading')?.classList.add('hidden');
+    if (!state.catalog || !state.catalog.products || !state.catalog.products.length) {
+      const msg = document.getElementById('cc-empty-msg');
+      if (msg) msg.textContent = "Catálogo listo para operar offline. Conéctate una vez si requieres actualizar.";
+      document.getElementById('cc-empty')?.classList.remove('hidden');
+    }
+  } finally {
+    state.isSyncing = false;
   }
 }
 
 /**
- * Recarga de datos (solo a petición del botón Actualizar).
+ * Actualización manual al presionar el botón del encabezado
  */
-async function reloadCatalogData() {
-  if (state.vendedor) {
-    if (state.sheetsUrl && navigator.onLine) {
-      try {
-        applyVendorCatalog(await downloadVendorCatalog(state.vendedor.codigo));
-        await loadMaestros();
-      } catch (e) {
-        console.warn("reload:", e);
-        const c = document.getElementById('catalog-counter');
-        if (c) c.textContent = 'Sin conexión: mostrando datos guardados';
-      }
-    } else {
-      applyFilters();
-    }
+async function refreshCatalogManually() {
+  const icon = document.getElementById('icon-refresh');
+  if (icon) icon.classList.add('fa-spin');
+
+  if (!navigator.onLine) {
+    alert("Estás sin conexión a internet. Mostrando catálogo guardado en este dispositivo.");
+    if (icon) icon.classList.remove('fa-spin');
     return;
   }
-  await loadCatalogData();
-  applyFilters();
+
+  try {
+    await syncCatalogInBackground();
+  } finally {
+    if (icon) icon.classList.remove('fa-spin');
+  }
 }
 
-/**
- * Borra TODA la caché vieja del navegador y recarga desde cero (bundle/Sheet).
- */
-function clearPreventaCache() {
-  ["ecomdx_published_catalog", "ecomdx_images", "ecomdx_selected_client_code", "ecomdx_vendedor_session", "ecomdx_vendor_catalog"].forEach(k => {
-    try { localStorage.removeItem(k); } catch (e) {}
-  });
-  state.products = [];
-  state.clients = [];
-  state.discounts = [];
-  state.cabysMap = {};
-  state.images = {};
-  state.currentClient = null;
-  location.reload();
+function applyBrand() {
+  const c = state.catalog || {};
+  const company = c.company || {};
+  const seller = c.seller || {};
+  const offer = c.offer || {};
+  document.title = `${company.name || 'Catálogo'}${seller.name ? ' • ' + seller.name : ''}`;
+  
+  const co = document.getElementById('cc-company');
+  if (co) co.textContent = company.name || 'Distribuciones Castro';
+  
+  const se = document.getElementById('cc-seller');
+  if (se) {
+    const label = [seller.name, seller.code ? 'Cód. ' + seller.code : ''].filter(Boolean).join(' • ');
+    se.textContent = label || 'Catálogo Digital';
+  }
+  
+  const logo = document.getElementById('cc-logo');
+  if (logo) {
+    if (company.logo) {
+      logo.src = company.logo;
+    } else {
+      logo.src = './logo.png';
+    }
+  }
+  
+  const hl = document.getElementById('cc-headline');
+  if (hl) {
+    let html = seller.headline ? `<span>${seller.headline}</span>` : '';
+    if (offer && offer.enabled && offer.image) {
+      html += `
+        <button onclick="openOffer()" class="inline-flex items-center gap-1.5 ml-2 px-2.5 py-1 rounded-lg bg-amber-500/10 text-amber-600 text-xs font-bold hover:bg-amber-500/20 active:scale-95 transition">
+          <i class="fa-solid fa-fire text-amber-500"></i> Ver oferta
+        </button>`;
+    }
+    hl.innerHTML = html;
+  }
+  
+  const send = document.getElementById('cc-send-label');
+  if (send && seller.name) send.textContent = `Enviar a ${seller.name} por WhatsApp`;
 }
 
-function clearSearch() {
-  const input = document.getElementById('catalog-search-input');
-  if (input) input.value = '';
-  applyFilters();
+function openOffer() {
+  const offer = state.catalog && state.catalog.offer;
+  if (!offer || !offer.image) return;
+  const modal = document.getElementById('cc-offer');
+  const img = document.getElementById('cc-offer-image');
+  const t = document.getElementById('cc-offer-title');
+  const cta = document.getElementById('cc-offer-cta');
+  if (img) img.src = offer.image;
+  if (t) t.textContent = offer.title || 'Oferta especial';
+  if (cta) cta.textContent = offer.cta || 'Ver productos';
+  if (modal) {
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  }
 }
 
-function setupEventListeners() {
-  // Tecla Escape cierra modales
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') {
-      closeZoomModal();
-      closeClientModal();
-      closeConfigModal();
-      toggleMenu(true);
-    }
-    // Enter en login ingresa
-    if (e.key === 'Enter' && !document.getElementById('login-overlay')?.classList.contains('hidden')) {
-      const tag = (document.activeElement && document.activeElement.tagName) || "";
-      if (tag !== "TEXTAREA") loginVendedor();
-    }
+function renderGrid() {
+  const grid = document.getElementById('cc-grid');
+  const empty = document.getElementById('cc-empty');
+  if (!grid || !state.catalog) return;
+  const q = (document.getElementById('cc-search')?.value || '').toLowerCase().trim();
+  const items = (state.catalog.products || []).filter(p => {
+    if (!q) return true;
+    return String(p.name || '').toLowerCase().includes(q) || String(p.code || '').toLowerCase().includes(q);
   });
-  // Cerrar menú al tocar fuera
-  document.addEventListener('click', (e) => {
-    const menu = document.getElementById('app-menu');
-    if (menu && !menu.classList.contains('hidden')) {
-      if (!e.target.closest('#app-menu') && !e.target.closest('#btn-seller')) {
-        menu.classList.add('hidden');
-      }
-    }
-  });
+  if (!items.length) {
+    grid.innerHTML = '';
+    if (empty) empty.classList.remove('hidden');
+    return;
+  }
+  if (empty) empty.classList.add('hidden');
+  grid.innerHTML = items.map(p => {
+    const qty = state.cart[p.code] || 0;
+    const sub = [p.supplierName || p.supplier, p.categoryName || p.category].filter(Boolean).join(' • ');
+    return `
+    <div class="bg-white rounded-2xl border border-slate-200/80 shadow-xs flex flex-col overflow-hidden">
+      <div class="w-full aspect-square bg-slate-50 border-b border-slate-100 flex items-center justify-center overflow-hidden">
+        ${p.image ? `<img src="${p.image}" alt="${p.name}" loading="lazy" onerror="this.outerHTML='<i class=\\\'fa-solid fa-box text-3xl text-slate-300\\\'></i>'" class="w-full h-full object-contain p-2">` : `<i class="fa-solid fa-box text-3xl text-slate-300"></i>`}
+      </div>
+      <div class="p-3 flex-1 flex flex-col">
+        <span class="text-[10px] font-bold text-blue-700">#${p.code}</span>
+        <h4 class="text-xs font-bold text-slate-800 line-clamp-2 leading-snug">${p.name}</h4>
+        ${sub ? `<div class="text-[10px] text-slate-400 truncate mt-0.5">${sub}</div>` : ''}
+        <div class="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between">
+          ${qty > 0 ? `
+          <div class="flex items-center gap-2">
+            <button onclick="changeQty('${p.code}', -1)" class="w-9 h-9 rounded-lg bg-slate-100 text-slate-700 font-bold">−</button>
+            <span class="text-sm font-extrabold w-5 text-center">${qty}</span>
+            <button onclick="changeQty('${p.code}', 1)" class="w-9 h-9 rounded-lg bg-slate-100 text-slate-700 font-bold">+</button>
+          </div>` : `
+          <button onclick="changeQty('${p.code}', 1)" class="px-3 py-2 rounded-lg bg-blue-600 active:bg-blue-700 text-white text-xs font-bold w-full text-center">Agregar</button>`}
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function changeQty(code, delta) {
+  const q = Math.max(0, (state.cart[code] || 0) + delta);
+  if (q === 0) delete state.cart[code];
+  else state.cart[code] = q;
+  try { localStorage.setItem('cc_cart_' + state.vendor, JSON.stringify(state.cart)); } catch (e) {}
+  updateCartBadge();
+  renderGrid();
+}
+
+function updateCartBadge() {
+  const n = Object.values(state.cart).reduce((a, b) => a + b, 0);
+  const el = document.getElementById('cart-count');
+  if (el) el.textContent = String(n);
+}
+
+function toggleCart(open) {
+  const m = document.getElementById('cc-cart');
+  if (!m) return;
+  if (open) renderCart();
+  m.classList.toggle('hidden', !open);
+}
+
+function renderCart() {
+  const box = document.getElementById('cc-cart-items');
+  if (!box) return;
+  const prods = state.catalog ? (state.catalog.products || []) : [];
+  const entries = Object.keys(state.cart).map(code => ({
+    p: prods.find(x => String(x.code) === String(code)),
+    qty: state.cart[code]
+  })).filter(x => x.p && x.qty > 0);
+  if (!entries.length) {
+    box.innerHTML = `<p class="text-xs text-slate-400 text-center p-6">Tu consulta está vacía. Agrega productos del catálogo.</p>`;
+    return;
+  }
+  box.innerHTML = entries.map(({ p, qty }) => `
+    <div class="p-3 flex items-center gap-3">
+      <div class="w-12 h-12 rounded-lg bg-slate-50 overflow-hidden shrink-0 flex items-center justify-center">
+        ${p.image ? `<img src="${p.image}" onerror="this.outerHTML='<i class=\\\'fa-solid fa-box text-slate-300\\\'></i>'" class="w-full h-full object-contain">` : `<i class="fa-solid fa-box text-slate-300"></i>`}
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="text-xs font-bold text-slate-900 truncate">${p.name}</div>
+        <div class="text-[10px] text-slate-400">#${p.code}</div>
+      </div>
+      <div class="flex items-center gap-1.5 shrink-0">
+        <button onclick="changeQty('${p.code}', -1);renderCart()" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">−</button>
+        <span class="text-xs font-extrabold w-4 text-center">${qty}</span>
+        <button onclick="changeQty('${p.code}', 1);renderCart()" class="w-8 h-8 rounded-lg bg-slate-100 font-bold">+</button>
+      </div>
+    </div>`).join('');
+}
+
+function sendOrder() {
+  const seller = (state.catalog && state.catalog.seller) || {};
+  const wa = String(seller.whatsapp || "").replace(/\D/g, "");
+  if (!wa) {
+    alert("Este catálogo aún no tiene WhatsApp configurado.");
+    return;
+  }
+  const prods = state.catalog.products || [];
+  const lines = Object.keys(state.cart).map(code => {
+    const p = prods.find(x => String(x.code) === String(code));
+    return p ? `• ${state.cart[code]} x ${p.name} (#${p.code})` : null;
+  }).filter(Boolean);
+  if (!lines.length) {
+    alert("Agrega productos antes de enviar.");
+    return;
+  }
+  const msg = `Hola ${seller.name || ''}, quiero consultar estos productos:%0A${encodeURIComponent(lines.join('\n'))}`;
+  window.open(`https://wa.me/${wa}?text=${msg}`, "_blank");
+}
+
+function maybeOffer() {
+  const offer = state.catalog && state.catalog.offer;
+  if (!offer || !offer.enabled || !offer.image) return;
+
+  // Validación de vigencia de fechas si están definidas
+  const todayStr = new Date().toISOString().slice(0, 10);
+  if (offer.start && todayStr < offer.start) return;
+  if (offer.end && todayStr > offer.end) return;
+
+  // Evitar reabrirlo en la misma sesión si el usuario ya lo cerró
+  if (sessionStorage.getItem(`cc_offer_closed_${state.vendor}`)) return;
+
+  const modal = document.getElementById('cc-offer');
+  const img = document.getElementById('cc-offer-image');
+  const t = document.getElementById('cc-offer-title');
+  const cta = document.getElementById('cc-offer-cta');
+
+  if (img) {
+    state.offerImages = String(offer.image || '').split(/[,\n]+/).map(s => s.trim()).filter(Boolean);
+    state.offerIdx = 0;
+    showOfferImage();
+    img.onerror = () => {
+      // Si la URL de la imagen falla o no carga, ocultar el modal para no bloquear al usuario
+      if (modal) modal.classList.add('hidden');
+    };
+    enableOfferSwipe();
+  }
+  if (t) t.textContent = offer.title || 'Oferta especial';
+  if (cta) cta.textContent = offer.cta || 'Ver productos';
+
+  if (modal) {
+    modal.classList.remove('hidden');
+    // Prevenir scroll en el fondo mientras el modal está abierto
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function showOfferImage() {
+  const imgs = state.offerImages || [];
+  if (!imgs.length) return;
+  state.offerIdx = Math.max(0, Math.min(state.offerIdx || 0, imgs.length - 1));
+  const img = document.getElementById('cc-offer-image');
+  if (img) img.src = imgs[state.offerIdx];
+  const prev = document.getElementById('cc-offer-prev');
+  const next = document.getElementById('cc-offer-next');
+  const multi = imgs.length > 1;
+  if (prev) { prev.classList.toggle('hidden', !multi); prev.classList.toggle('flex', multi); }
+  if (next) { next.classList.toggle('hidden', !multi); next.classList.toggle('flex', multi); }
+  const dots = document.getElementById('cc-offer-dots');
+  if (dots) {
+    dots.innerHTML = multi ? imgs.map((_, i) =>
+      `<button onclick="showOfferAt(${i})" aria-label="Imagen ${i + 1}" class="h-1.5 rounded-full transition-all ${i === state.offerIdx ? 'w-5 bg-white' : 'w-1.5 bg-white/50'}"></button>`
+    ).join('') : '';
+  }
+}
+
+function showOfferAt(i) {
+  state.offerIdx = i;
+  showOfferImage();
+}
+
+function moveOffer(delta) {
+  const n = (state.offerImages || []).length;
+  if (!n) return;
+  state.offerIdx = ((state.offerIdx || 0) + delta + n) % n;
+  showOfferImage();
+}
+
+function enableOfferSwipe() {
+  const stage = document.getElementById('cc-offer-stage');
+  if (!stage || stage.dataset.swipe === '1') return;
+  stage.dataset.swipe = '1';
+  let x0 = null;
+  stage.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; }, { passive: true });
+  stage.addEventListener('touchend', (e) => {
+    if (x0 === null) return;
+    const dx = e.changedTouches[0].clientX - x0;
+    x0 = null;
+    if (Math.abs(dx) > 40) moveOffer(dx < 0 ? 1 : -1);
+  }, { passive: true });
+}
+
+function closeOffer() {
+  const modal = document.getElementById('cc-offer');
+  if (modal) modal.classList.add('hidden');
+  document.body.style.overflow = '';
+  // Marcar como cerrado en esta sesión para no ser molesto al navegar
+  try {
+    sessionStorage.setItem(`cc_offer_closed_${state.vendor}`, "1");
+  } catch (e) {}
 }
